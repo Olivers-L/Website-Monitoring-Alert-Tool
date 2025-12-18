@@ -1,117 +1,75 @@
-#!/usr/bin/env python3
-"""
-Website Monitoring & Alert Tool
-- Checks uptime, response time, and content changes
-- Sends alerts via Discord webhook or email (optional)
-"""
-
 import argparse
-import hashlib
-import json
-import os
 import time
-from datetime import datetime
-from typing import Dict
-
 import requests
+from rich.console import Console
+from rich.panel import Panel
+from rich import box
 
-STATE_FILE = "state.json"
-
-
-def load_state() -> Dict:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+console = Console()
 
 
-def save_state(state: Dict) -> None:
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
+def print_status(url, status, message):
+    if status == "UP":
+        console.print(f"[green]✔ UP[/green] {url} [dim]- {message}[/dim]")
+    elif status == "DOWN":
+        console.print(f"[red]✖ DOWN[/red] {url} [dim]- {message}[/dim]")
+    elif status == "WARN":
+        console.print(f"[yellow]⚠ WARN[/yellow] {url} [dim]- {message}[/dim]")
 
 
-def hash_content(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
-
-
-def send_discord(webhook_url: str, message: str) -> None:
-    payload = {"content": message}
+def check_website(url, max_response_time):
     try:
-        requests.post(webhook_url, json=payload, timeout=10)
-    except Exception:
-        pass
+        start = time.time()
+        response = requests.get(url, timeout=10)
+        elapsed = time.time() - start
 
+        if elapsed > max_response_time:
+            print_status(
+                url,
+                "WARN",
+                f"Slow response ({elapsed:.2f}s)"
+            )
+        else:
+            print_status(
+                url,
+                "UP",
+                f"{response.status_code} OK ({elapsed:.2f}s)"
+            )
 
-def check_site(url: str, timeout: int = 10) -> Dict:
-    start = time.time()
-    resp = requests.get(url, timeout=timeout)
-    elapsed = round(time.time() - start, 3)
-    content_hash = hash_content(resp.text)
-    return {
-        "status_code": resp.status_code,
-        "response_time": elapsed,
-        "content_hash": content_hash,
-    }
+    except requests.exceptions.Timeout:
+        print_status(url, "DOWN", "Request timed out")
+    except requests.exceptions.ConnectionError:
+        print_status(url, "DOWN", "DNS resolution failed")
+    except Exception as e:
+        print_status(url, "DOWN", str(e))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Monitor a website for uptime and content changes")
+    parser = argparse.ArgumentParser(description="Website Monitoring Tool")
     parser.add_argument("url", help="Website URL to monitor")
     parser.add_argument("--interval", type=int, default=300, help="Check interval in seconds")
-    parser.add_argument("--discord-webhook", help="Discord webhook URL for alerts")
-    parser.add_argument("--max-response-time", type=float, default=3.0, help="Alert if response time exceeds this (seconds)")
+    parser.add_argument("--max-response-time", type=float, default=1.0, help="Max response time in seconds")
+
     args = parser.parse_args()
 
-    state = load_state()
-    url_state = state.get(args.url, {})
+    console.print(
+        Panel.fit(
+            "[bold cyan]Website Monitoring Tool[/bold cyan]\n"
+            "[dim]Press Ctrl+C to stop[/dim]",
+            box=box.ROUNDED,
+        )
+    )
 
-    print(f"Monitoring {args.url} every {args.interval}s. Press Ctrl+C to stop.")
+    console.print(
+        f"[dim]Monitoring {args.url} every {args.interval}s[/dim]\n"
+    )
 
-    while True:
-        try:
-            result = check_site(args.url)
-            now = datetime.utcnow().isoformat() + "Z"
-
-            alerts = []
-
-            # Uptime check
-            if result["status_code"] >= 400:
-                alerts.append(f"🚨 {args.url} returned status {result['status_code']}")
-
-            # Response time check
-            if result["response_time"] > args.max_response_time:
-                alerts.append(
-                    f"⚠️ Slow response: {result['response_time']}s (> {args.max_response_time}s)"
-                )
-
-            # Content change check
-            if url_state.get("content_hash") and url_state.get("content_hash") != result["content_hash"]:
-                alerts.append("🔄 Website content changed")
-
-            # Save latest state
-            url_state = {
-                "last_checked": now,
-                "status_code": result["status_code"],
-                "response_time": result["response_time"],
-                "content_hash": result["content_hash"],
-            }
-            state[args.url] = url_state
-            save_state(state)
-
-            log_line = f"[{now}] {args.url} | {result['status_code']} | {result['response_time']}s"
-            print(log_line)
-
-            if alerts and args.discord_webhook:
-                message = "\n".join(alerts)
-                send_discord(args.discord_webhook, message)
-
-        except KeyboardInterrupt:
-            print("\nStopped.")
-            break
-        except Exception as e:
-            print(f"Error: {e}")
-
-        time.sleep(args.interval)
+    try:
+        while True:
+            check_website(args.url, args.max_response_time)
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        console.print("\n[bold red]Monitoring stopped[/bold red]")
 
 
 if __name__ == "__main__":
